@@ -42,9 +42,7 @@ admin_password: "admin"
 ---
 
 ## 🔧 Usage
-1️⃣ Clone the repository
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
+1️⃣ Clone the repository using git clone 
 
 2️⃣ Edit Variables
 
