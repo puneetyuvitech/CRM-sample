@@ -57,7 +57,7 @@ admin_password: "admin"
 5. SuiteCRM download URL (optional, defaults to 8.9.0)
 
 3️⃣ Run the Playbook
-ansible-playbook suitecrm_nginx.ym
+ansible-playbook suitecrm_nginx.yml
 
 At the end of the run, SuiteCRM will be accessible via your configured domain or server IP.
 
