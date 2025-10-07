@@ -1,0 +1,304 @@
+---
+- name: Install and Configure SuiteCRM with Nginx
+  hosts: all
+  become: true
+  vars_files:
+    - vars.yml
+  vars:
+    web_root: "/var/www/{{ domain_name }}"
+    suitecrm_zip_path: "/tmp/suitecrm.zip"
+    config_path: "{{ web_root }}/config.php"
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - nginx
+          - mariadb-server
+          - php-fpm
+          - php-mbstring
+          - php-mysql
+          - php-zip
+          - php-curl
+          - php-xml
+          - php-ldap
+          - php-imap
+          - php-gd
+          - php-soap
+          - php-intl
+          - unzip
+          - curl
+          - python3-pymysql
+          - composer
+        state: present
+        update_cache: yes
+
+    - name: Start and enable Nginx
+      service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Get PHP version
+      command: php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;'
+      register: php_version
+      changed_when: false
+
+    - name: Configure PHP upload and post size limits for PHP-FPM
+      lineinfile:
+        path: "/etc/php/{{ php_version.stdout }}/fpm/php.ini"
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+        backup: yes
+      loop:
+        - { regexp: '^upload_max_filesize\s*=', line: 'upload_max_filesize = 1024M' }
+        - { regexp: '^max_file_uploads\s*=',   line: 'max_file_uploads = 1000' }
+        - { regexp: '^post_max_size\s*=',      line: 'post_max_size = 1024M' }
+
+    - name: Configure PHP upload and post size limits for PHP CLI
+      lineinfile:
+        path: "/etc/php/{{ php_version.stdout }}/cli/php.ini"
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+        backup: yes
+      loop:
+        - { regexp: '^upload_max_filesize\s*=', line: 'upload_max_filesize = 1024M' }
+        - { regexp: '^max_file_uploads\s*=',   line: 'max_file_uploads = 1000' }
+        - { regexp: '^post_max_size\s*=',      line: 'post_max_size = 1024M' }
+
+    - name: Restart PHP-FPM to apply new settings
+      service:
+        name: "php{{ php_version.stdout }}-fpm"
+        state: restarted
+
+    - name: Set MySQL root password (first-time setup only)
+      command: mysqladmin -u root password '{{ mysql_root_password }}'
+      ignore_errors: true
+
+    - name: Ensure SuiteCRM database exists
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Ensure SuiteCRM DB user exists
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+        host: "{{ db_host }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Download SuiteCRM archive
+      get_url:
+        url: "{{ suitecrm_url }}"
+        dest: "{{ suitecrm_zip_path }}"
+
+    - name: Create SuiteCRM web root directory
+      file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Extract SuiteCRM archive
+      unarchive:
+        src: "{{ suitecrm_zip_path }}"
+        dest: "{{ web_root }}"
+        remote_src: yes
+
+    - name: List contents of web_root after extraction
+      command: ls -lR {{ web_root }}
+      register: suitecrm_files
+
+    - name: Move extracted SuiteCRM files out of nested directory
+      shell: mv {{ web_root }}/SuiteCRM*/* {{ web_root }}/
+      args:
+        removes: "{{ web_root }}/SuiteCRM*"
+      when: suitecrm_files.stdout_lines | select('search', 'SuiteCRM') | list | length > 0
+
+    - debug:
+        var: suitecrm_files.stdout_lines
+
+    - name: Ensure all SuiteCRM files/folders are owned by www-data
+      file:
+        path: "{{ web_root }}"
+        owner: www-data
+        group: www-data
+        recurse: yes
+        state: directory
+
+    - name: Ensure proper permissions for SuiteCRM directories and files
+      shell: |
+        find {{ web_root }} -type d -exec chmod 755 {} \;
+        find {{ web_root }} -type f -exec chmod 644 {} \;
+
+    - name: Run composer install in SuiteCRM root
+      command: composer install --no-dev --optimize-autoloader
+      args:
+        chdir: "{{ web_root }}"
+      environment:
+        COMPOSER_ALLOW_SUPERUSER: "1"
+
+    - name: Set ownership of vendor and cache directories
+      file:
+        path: "{{ item }}"
+        owner: www-data
+        group: www-data
+        recurse: yes
+      loop:
+        - "{{ web_root }}/vendor"
+        - "{{ web_root }}/var/cache"
+
+    - name: Restart PHP-FPM
+      service:
+        name: "php{{ php_version.stdout }}-fpm"
+        state: restarted
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+
+    - name: Configure Nginx for SuiteCRM
+      copy:
+        dest: "/etc/nginx/sites-available/{{ domain_name }}"
+        content: |
+          server {
+              listen 80;
+              server_name {{ domain_name }};
+              root {{ web_root }}/public;
+              index index.php index.html index.htm;
+
+              location / {
+                  try_files $uri $uri/ /index.php?$args;
+              }
+
+              location ~ \.php$ {
+                  include snippets/fastcgi-php.conf;
+                  fastcgi_pass unix:/run/php/php{{ php_version.stdout }}-fpm.sock;
+                  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+              }
+
+              location ~ /\.ht {
+                  deny all;
+              }
+          }
+
+    - name: Enable SuiteCRM Nginx site
+      file:
+         src: "/etc/nginx/sites-available/{{ domain_name }}"
+         dest: "/etc/nginx/sites-enabled/{{ domain_name }}"
+         state: link
+         force: yes
+
+    - name: Remove default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Test Nginx configuration
+      command: nginx -t
+      register: nginx_test
+      changed_when: false
+      failed_when: nginx_test.rc != 0
+
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded
+
+    - name: Create config.php for SuiteCRM inline
+      copy:
+        dest: "{{ config_path }}"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+        content: |
+          <?php
+          // SuiteCRM config.php generated by Ansible
+          $sugar_config = array();
+
+          $sugar_config['dbconfig'] = array(
+            'db_host_name' => '{{ db_host }}',
+            'db_user_name' => '{{ db_user }}',
+            'db_password' => '{{ db_password }}',
+            'db_name' => '{{ db_name }}',
+            'db_type' => 'mysql',
+            'db_port' => '',
+          );
+
+          $sugar_config['site_url'] = 'http://{{ domain_name }}';
+
+          $sugar_config['default_language'] = 'en_us';
+
+          // Add other SuiteCRM config parameters as needed
+
+          return $sugar_config;
+
+    - name: Create legacy directory for .htaccess
+      file:
+        path: "{{ web_root }}/public/legacy"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Create missing .htaccess inline
+      copy:
+        dest: "{{ web_root }}/public/legacy/.htaccess"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+        content: |
+          RewriteEngine On
+          RewriteBase /legacy
+          <FilesMatch "^\.">
+              Require all denied
+          </FilesMatch>
+
+    - name: Set executable permission on SuiteCRM console script
+      file:
+        path: "{{ web_root }}/bin/console"
+        mode: '0755'
+        owner: www-data
+        group: www-data
+
+    - name: Run SuiteCRM CLI installer
+      command: >
+        {{ web_root }}/bin/console suitecrm:app:install
+        -u "{{ admin_user }}"
+        -p "{{ admin_password }}"
+        -U "{{ db_user }}"
+        -P "{{ db_password }}"
+        -H "{{ db_host }}"
+        -N "{{ db_name }}"
+        -S "http://{{ domain_name }}"
+        -d "no"
+      args:
+        chdir: "{{ web_root }}"
+      become: true
+
+    - name: Set ownership to www-data recursively
+      file:
+        path: "{{ web_root }}"
+        owner: www-data
+        group: www-data
+        recurse: yes
+
+    - name: Set directory permissions to 755
+      command: find {{ web_root }} -type d -exec chmod 755 {} \;
+
+    - name: Set file permissions to 644
+      command: find {{ web_root }} -type f -exec chmod 644 {} \;
+      
+  handlers:
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded

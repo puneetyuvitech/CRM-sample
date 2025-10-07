@@ -1,0 +1,11 @@
+domain_name: "suitecrm.site"
+suitecrm_url: "https://suitecrm.com/download/166/suite89/565428/suitecrm-8-9-0.zip"
+
+mysql_root_password: "root"
+db_name: "suitecrm_db"
+db_user: "suitecrm_user"
+db_password: "suitecrm_password"
+db_host: "localhost"
+
+admin_user: "admin"
+admin_password: "admin"
